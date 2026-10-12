@@ -1,10 +1,10 @@
 #!/bin/sh
 # Packages a library that its build script has built into dist/<tag>/, the
 # assets of its release <tag> = <library>-<version>-<revision>:
-#   <tag>.xcframework.zip (libass) or <tag>.tar.gz (mpv, media3-ffmpeg), the
-#     binaries;
+#   <tag>.xcframework.zip (libass) or <tag>.tar.gz (mpv, mpv-macos,
+#     media3-ffmpeg), the binaries;
 #   <tag>-sources.tar.gz, the sources of every component in them and the
-#     scripts that built them;
+#     scripts and patches that built them;
 #   manifest.json, what the main repository reads: the assets, their URLs
 #     and SHA-256 digests, and the components with their licenses;
 #   SHA256SUMS, the digests of the other assets;
@@ -25,6 +25,7 @@ repository=https://github.com/mavioai/mavio-deps
 case $lib in
 libass) dir=Libass.xcframework into=libs/apple/build ;;
 mpv) dir=mpv into=libs/android/player/build ;;
+mpv-macos) dir=mpv-macos into=apps/desktop/build ;;
 media3-ffmpeg) dir=ffmpeg into=libs/android/player/build ;;
 *)
 	echo "package: unknown library $lib" >&2
@@ -69,10 +70,10 @@ else
 	tar -czf "$dist/$binary" -C "$root/out" "$dir"
 fi
 
-# The sources, with this repository's scripts, tools and license.
+# The sources, with this repository's scripts, patches, tools and license.
 staging=$root/work/package/$tag-sources
 rm -rf "$staging" && mkdir -p "$staging"
-cp -R LICENSE README.md README.zh-CN.md mise.toml scripts "$staging/"
+cp -R LICENSE README.md README.zh-CN.md mise.toml scripts patches "$staging/"
 cp -R "$sources" "$staging/sources"
 source=$tag-sources.tar.gz
 tar -czf "$dist/$source" -C "$(dirname "$staging")" "$tag-sources"
@@ -148,7 +149,7 @@ done) >"$dist/SHA256SUMS"
 	while IFS=$tab read -r name cversion license upstream; do
 		printf '| [%s](%s) | `%s` | %s |\n' "$name" "$upstream" "$cversion" "$license"
 	done <"$sources/COMPONENTS"
-	printf '\n`%s` holds the sources of every component and the scripts that built them.\n' "$source"
+	printf '\n`%s` holds the sources of every component and the scripts and patches that built them.\n' "$source"
 } >"$dist/notes.md"
 
 echo "$tag"
