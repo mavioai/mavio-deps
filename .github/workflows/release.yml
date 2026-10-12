@@ -9,6 +9,7 @@ on:
     tags:
       - libass-*
       - mpv-*
+      - mpv-macos-*
       - media3-ffmpeg-*
   pull_request:
   workflow_dispatch:
@@ -16,7 +17,7 @@ on:
       library:
         description: The library to build
         type: choice
-        options: [libass, mpv, media3-ffmpeg]
+        options: [libass, mpv, mpv-macos, media3-ffmpeg]
         required: true
 
 permissions:
@@ -45,11 +46,12 @@ jobs:
           revision=0
           case $EVENT in
           push)
-            if ! printf '%s\n' "$TAG" | grep -Eq '^(libass|mpv|media3-ffmpeg)-[0-9A-Za-z.]+-[1-9][0-9]*$'; then
+            if ! printf '%s\n' "$TAG" | grep -Eq '^(libass|mpv|mpv-macos|media3-ffmpeg)-[0-9A-Za-z.]+-[1-9][0-9]*$'; then
               echo "::error::$TAG is not <library>-<version>-<revision>"
               exit 1
             fi
-            for l in libass mpv media3-ffmpeg; do
+            # mpv-macos after mpv: mpv-* matches its tags too.
+            for l in libass mpv mpv-macos media3-ffmpeg; do
               case $TAG in "$l"-*) libraries=$l ;; esac
             done
             revision=${TAG##*-}
@@ -61,11 +63,11 @@ jobs:
             changed=$(git diff --name-only "$BASE" HEAD)
             # A change to what every build shares builds every library.
             if printf '%s\n' "$changed" | grep -Eq '^(scripts/lib\.sh|scripts/package\.sh|mise\.toml|\.github/)'; then
-              libraries="libass mpv media3-ffmpeg"
+              libraries="libass mpv mpv-macos media3-ffmpeg"
             else
               libraries=""
-              for l in libass mpv media3-ffmpeg; do
-                if printf '%s\n' "$changed" | grep -qx "scripts/build-$l.sh"; then
+              for l in libass mpv mpv-macos media3-ffmpeg; do
+                if printf '%s\n' "$changed" | grep -Eq "^(scripts/build-$l\.sh|patches/$l/)"; then
                   libraries="$libraries $l"
                 fi
               done
@@ -74,9 +76,10 @@ jobs:
           esac
           builds=$(for l in $libraries; do
             case $l in
-            libass) printf '{"library":"libass","runner":"macos-latest","timeout":60,"disable":"java,shellcheck"}\n' ;;
-            mpv) printf '{"library":"mpv","runner":"ubuntu-latest","timeout":240,"disable":"shellcheck"}\n' ;;
-            media3-ffmpeg) printf '{"library":"media3-ffmpeg","runner":"ubuntu-latest","timeout":60,"disable":"shellcheck"}\n' ;;
+            libass) printf '{"library":"libass","runner":"macos-latest","timeout":60,"disable":"java,cmake,shellcheck"}\n' ;;
+            mpv) printf '{"library":"mpv","runner":"ubuntu-latest","timeout":240,"disable":"cmake,shellcheck"}\n' ;;
+            mpv-macos) printf '{"library":"mpv-macos","runner":"macos-latest","timeout":180,"disable":"java,shellcheck"}\n' ;;
+            media3-ffmpeg) printf '{"library":"media3-ffmpeg","runner":"ubuntu-latest","timeout":60,"disable":"cmake,shellcheck"}\n' ;;
             esac
           done | jq -sc .)
           {
@@ -88,7 +91,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     env:
-      MISE_DISABLE_TOOLS: java,meson,ninja
+      MISE_DISABLE_TOOLS: java,meson,ninja,cmake
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
@@ -114,6 +117,8 @@ jobs:
       - uses: jdx/mise-action@v2
       - if: matrix.library == 'mpv'
         run: sudo apt-get install -y autoconf automake libtool pkg-config gperf nasm
+      - if: matrix.library == 'mpv-macos'
+        run: brew install pkgconf nasm
       - run: sh "scripts/build-$LIBRARY.sh"
       - id: package
         env:
