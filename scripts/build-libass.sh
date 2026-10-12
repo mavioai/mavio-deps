@@ -103,9 +103,11 @@ CROSS
 		-Dharfbuzz:coretext=disabled -Dharfbuzz:icu=disabled -Dharfbuzz:utilities=disabled \
 		>"$work/$name.log"
 	ninja -C "$build" >>"$work/$name.log"
-	# One archive with its dependencies.
+	# One archive with its dependencies, named libass.a in a directory of
+	# its own: Xcode takes only static libraries named lib*.a.
+	mkdir -p "$work/$name"
 	# shellcheck disable=SC2046
-	libtool -static -o "$work/$name.a" "$build/libass/libass.a" \
+	libtool -static -o "$work/$name/libass.a" "$build/libass/libass.a" \
 		$(find "$build/subprojects" -name '*.a') 2>/dev/null
 }
 
@@ -116,10 +118,11 @@ slice tvos-sim appletvsimulator arm64 -mtvos-simulator-version-min=18.0
 macos=""
 for arch in $archs; do
 	slice "macos-$arch" macosx "$arch" -mmacosx-version-min=15.0
-	macos="$macos $work/macos-$arch.a"
+	macos="$macos $work/macos-$arch/libass.a"
 done
+mkdir -p "$work/macos"
 # shellcheck disable=SC2086
-lipo -create $macos -output "$work/macos.a"
+lipo -create $macos -output "$work/macos/libass.a"
 
 # The headers and module map in a directory of their own, apart from those
 # of other libraries in the same build.
@@ -131,7 +134,7 @@ printf 'module Libass {\n    header "ass.h"\n    link "c++"\n    link framework 
 rm -rf "$out" && mkdir -p "$(dirname "$out")"
 args=""
 for p in ios ios-sim tvos tvos-sim macos; do
-	args="$args -library $work/$p.a -headers $headers"
+	args="$args -library $work/$p/libass.a -headers $headers"
 done
 # shellcheck disable=SC2086
 xcodebuild -create-xcframework $args -output "$out" >/dev/null
