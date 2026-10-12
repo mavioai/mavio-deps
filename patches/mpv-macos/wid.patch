@@ -1,0 +1,210 @@
+Mavio's patch to embed mpv in a host view: with --wid set to an NSView*
+(as an int64), the macvk context (vo=gpu-next, gpu-context=macvk) draws in
+a view of its own added to that view, which the host lays out, instead of
+creating a window, and leaves the application's activation policy, menu
+and icon to the host. Against mpv 88eb9f2; scripts/build-mpv-macos.sh
+applies it with git apply, which skips this header.
+
+diff --git a/video/out/mac/common.swift b/video/out/mac/common.swift
+index 07b9f83..d604346 100644
+--- a/video/out/mac/common.swift
++++ b/video/out/mac/common.swift
+@@ -26,6 +26,9 @@ class Common: NSObject {
+ 
+     @objc var window: Window?
+     var view: View?
++    // The view mpv draws into in the host's view of --wid, when embedded,
++    // instead of a window of its own.
++    @objc var embedded: NSView?
+     var titleBar: TitleBar?
+ 
+     var link: CVDisplayLink?
+@@ -155,6 +158,8 @@ class Common: NSObject {
+ 
+         titleBar?.removeFromSuperview()
+         view?.removeFromSuperview()
++        embedded?.removeFromSuperview()
++        embedded = nil
+     }
+ 
+     func displayLinkCallback(_ displayLink: CVDisplayLink,
+@@ -188,7 +193,7 @@ class Common: NSObject {
+     }
+ 
+     func updateDisplaylink() {
+-        guard let screen = window?.screen, let link = self.link else {
++        guard let screen = window?.screen ?? embedded?.window?.screen, let link = self.link else {
+             log.warning("Couldn't update DisplayLink, no Screen or DisplayLink available")
+             return
+         }
+@@ -313,7 +318,7 @@ class Common: NSObject {
+     var reconfigureCallback: CGDisplayReconfigurationCallBack = { (display, flags, userInfo) in
+         if flags.contains(.setModeFlag) {
+             let com = unsafeBitCast(userInfo, to: Common.self)
+-            let displayID = com.window?.screen?.displayID ?? display
++            let displayID = (com.window?.screen ?? com.embedded?.window?.screen)?.displayID ?? display
+ 
+             if displayID == display {
+                 com.log.verbose("Detected display mode change, updating screen refresh rate")
+@@ -404,6 +409,7 @@ class Common: NSObject {
+     }
+ 
+     func getCurrentScreen() -> NSScreen? {
++         if let embedded = embedded { return embedded.window?.screen ?? NSScreen.main }
+          return window != nil ? window?.screen :
+                                     getTargetScreen(forFullscreen: false) ??
+                                     NSScreen.main
+@@ -564,7 +570,7 @@ class Common: NSObject {
+         case VOCTRL_GET_HIDPI_SCALE:
+             let scaleFactor = data!.assumingMemoryBound(to: CDouble.self)
+             let screen = getCurrentScreen()
+-            let factor = window?.backingScaleFactor ??
++            let factor = window?.backingScaleFactor ?? embedded?.window?.backingScaleFactor ??
+                          screen?.backingScaleFactor ?? 1.0
+             scaleFactor.pointee = Double(factor)
+             return VO_TRUE
+diff --git a/video/out/mac_common.swift b/video/out/mac_common.swift
+index e2e9dd1..45a4f1c 100644
+--- a/video/out/mac_common.swift
++++ b/video/out/mac_common.swift
+@@ -24,6 +24,7 @@ class MacCommon: Common {
+     var timer: PreciseTimer?
+     var swapTime: UInt64 = 0
+     let swapLock: NSCondition = NSCondition()
++    var embeddedObservers: [NSObjectProtocol] = []
+ 
+     @objc init(_ vo: UnsafeMutablePointer<vo>) {
+         let log = LogHelper(mp_log_new(vo, vo.pointee.log, "mac"))
+@@ -45,7 +46,10 @@ class MacCommon: Common {
+ 
+         DispatchQueue.main.sync {
+             let previousActiveApp = getActiveApp()
+-            initApp()
++            // An embedded mpv leaves the app's policy and icon to the host.
++            if option.vo.WinID <= 0 {
++                initApp()
++            }
+ 
+             let (screen, wr, forcePosition) = getInitProperties(vo)
+             guard let layer = self.layer else {
+@@ -53,13 +57,19 @@ class MacCommon: Common {
+                 exit(1)
+             }
+ 
+-            if window == nil {
++            if option.vo.WinID > 0 {
++                if embedded == nil {
++                    initEmbedded(layer)
++                }
++            } else if window == nil {
+                 initView(vo, layer)
+                 initWindow(vo, previousActiveApp)
+                 initWindowState()
+             }
+ 
+-            if forcePosition {
++            if embedded != nil {
++                // The host lays out its view.
++            } else if forcePosition {
+                 window?.updateFrame(wr, screen)
+             } else if option.vo.auto_window_resize {
+                 window?.updateSize(wr.size)
+@@ -76,12 +86,60 @@ class MacCommon: Common {
+         return true
+     }
+ 
++    // Embeds the layer in a view filling the NSView that --wid points to,
++    // the host's: it lays the view out, takes the input and owns the window.
++    func initEmbedded(_ layer: MetalLayer) {
++        let host = Unmanaged<NSView>.fromOpaque(UnsafeRawPointer(bitPattern: Int(option.vo.WinID))!)
++            .takeUnretainedValue()
++        let view = NSView(frame: host.bounds)
++        view.autoresizingMask = [.width, .height]
++        view.layer = layer
++        view.wantsLayer = true
++        view.layerContentsPlacement = .scaleProportionallyToFit
++        view.postsFrameChangedNotifications = true
++        host.addSubview(view)
++        embedded = view
++        layer.contentsScale = host.window?.backingScaleFactor ?? 1
++
++        let center = NotificationCenter.default
++        embeddedObservers = [
++            center.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: .main) { _ in
++                self.windowDidResize()
++            },
++            center.addObserver(forName: NSWindow.didChangeBackingPropertiesNotification, object: nil,
++                               queue: .main) { n in
++                if (n.object as? NSWindow) == self.embedded?.window { self.windowDidChangeBackingProperties() }
++            },
++            center.addObserver(forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main) { n in
++                if (n.object as? NSWindow) == self.embedded?.window {
++                    self.updateDisplaylink()
++                    self.windowDidChangeScreenProfile()
++                }
++            },
++            center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: nil,
++                               queue: .main) { n in
++                if (n.object as? NSWindow) == self.embedded?.window { self.windowDidChangeOcclusionState() }
++            },
++        ]
++    }
++
++    // The size of the drawable in pixels: the window's, or the embedded
++    // view's.
++    @objc var framePixel: CGSize {
++        if let view = embedded {
++            return view.convertToBacking(view.bounds).size
++        }
++        return window?.framePixel.size ?? .zero
++    }
++
+     @objc func uninit(_ vo: UnsafeMutablePointer<vo>) {
+         window?.waitForAnimation()
+ 
+         timer?.terminate()
+ 
+         DispatchQueue.main.sync {
++            embeddedObservers.forEach { NotificationCenter.default.removeObserver($0) }
++            embeddedObservers = []
+             window?.delegate = nil
+             window?.close()
+ 
+@@ -111,6 +169,7 @@ class MacCommon: Common {
+ 
+     @objc func isVisible() -> Bool {
+         return window?.occlusionState.contains(.visible) ?? false ||
++               embedded?.window?.occlusionState.contains(.visible) ?? false ||
+                option.vo.force_render ||
+                needsInitialDraw
+     }
+@@ -175,7 +234,7 @@ class MacCommon: Common {
+     }
+ 
+     override func windowDidChangeBackingProperties() {
+-        layer?.contentsScale = window?.backingScaleFactor ?? 1
++        layer?.contentsScale = window?.backingScaleFactor ?? embedded?.window?.backingScaleFactor ?? 1
+         windowDidResize()
+     }
+ 
+diff --git a/video/out/vulkan/context_mac.m b/video/out/vulkan/context_mac.m
+index 559e361..a1cf4d2 100644
+--- a/video/out/vulkan/context_mac.m
++++ b/video/out/vulkan/context_mac.m
+@@ -114,10 +114,14 @@ static bool resize(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
+ 
+-    if (!p->vo_mac.window) {
++    if (!p->vo_mac.window && !p->vo_mac.embedded) {
+         return false;
+     }
+-    CGSize size = p->vo_mac.window.framePixel.size;
++    CGSize size = p->vo_mac.framePixel;
++    // An embedded view the host has not laid out yet has no size.
++    if (size.width < 1 || size.height < 1) {
++        return true;
++    }
+ 
+     return ra_vk_ctx_resize(ctx, (int)size.width, (int)size.height);
+ }

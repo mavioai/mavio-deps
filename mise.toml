@@ -1,9 +1,11 @@
 # The tools the builds need, at the versions Mavio's mise.toml pins.
 [tools]
-# The meson builds: libass, and mpv-android's builds of libmpv and its
-# dependencies.
+# The meson builds: libass, libmpv for macOS and its dependencies, and
+# mpv-android's builds of libmpv and its dependencies.
 meson = "1.12.1"
 ninja = "1.13.2"
+# glslang's build, for libmpv for macOS.
+cmake = "4.4.4"
 # sdkmanager, which installs the Android NDK.
 java = "temurin-21.0.12+8.0.LTS"
 # Lints the scripts.
