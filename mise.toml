@@ -1,0 +1,10 @@
+# The tools the builds need, at the versions Mavio's mise.toml pins.
+[tools]
+# The meson builds: libass, and mpv-android's builds of libmpv and its
+# dependencies.
+meson = "1.12.1"
+ninja = "1.13.2"
+# sdkmanager, which installs the Android NDK.
+java = "temurin-21.0.12+8.0.LTS"
+# Lints the scripts.
+shellcheck = "0.11.0"
