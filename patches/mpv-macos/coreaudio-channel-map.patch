@@ -1,0 +1,162 @@
+diff --git a/audio/out/ao_coreaudio.c b/audio/out/ao_coreaudio.c
+index 7d42139..6f82508 100644
+--- a/audio/out/ao_coreaudio.c
++++ b/audio/out/ao_coreaudio.c
+@@ -136,7 +136,7 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
+     return CONTROL_UNKNOWN;
+ }
+ 
+-static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd, AudioChannelLayout *layout, size_t layout_size);
++static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd);
+ static void init_physical_format(struct ao *ao);
+ static void reinit_latency(struct ao *ao);
+ static bool register_hotplug_cb(struct ao *ao);
+@@ -176,13 +176,8 @@ static int init(struct ao *ao)
+ 
+     AudioStreamBasicDescription asbd;
+     ca_fill_asbd(ao, &asbd);
+-    size_t layout_size;
+-    AudioChannelLayout *layout = ca_get_acl(ao, &layout_size);
+ 
+-    bool r = init_audiounit(ao, asbd, layout, layout_size);
+-    talloc_free(layout);
+-
+-    if (!r)
++    if (!init_audiounit(ao, asbd))
+         goto coreaudio_error;
+ 
+     if (!register_hotplug_cb(ao))
+@@ -279,7 +274,7 @@ coreaudio_error:
+     talloc_free(tmp);
+ }
+ 
+-static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd, AudioChannelLayout *layout, size_t layout_size)
++static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd)
+ {
+     OSStatus err;
+     uint32_t size;
+@@ -323,12 +318,25 @@ static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd, Audi
+     CHECK_CA_ERROR_L(coreaudio_error_audiounit,
+                      "can't link audio unit to selected device");
+ 
+-    err = AudioUnitSetProperty(p->audio_unit,
+-                               kAudioOutputUnitProperty_ChannelMap,
+-                               kAudioUnitScope_Global, 0, layout, layout_size);
+-
+-    CHECK_CA_ERROR_L(coreaudio_error_audiounit,
+-                     "unable to set the input channel layout on the audio unit");
++    // The channel map is an array with an entry for each of the device's
++    // channels naming the stream's channel it plays, or -1: an
++    // AudioChannelLayout is refused, and the unit then never renders.
++    AudioStreamBasicDescription device_asbd;
++    size = sizeof(device_asbd);
++    err = AudioUnitGetProperty(p->audio_unit, kAudioUnitProperty_StreamFormat,
++                               kAudioUnitScope_Output, 0, &device_asbd, &size);
++    if (err == noErr && device_asbd.mChannelsPerFrame > 0) {
++        int device_channels = device_asbd.mChannelsPerFrame;
++        SInt32 *map = talloc_array(NULL, SInt32, device_channels);
++        if (ca_get_channel_map(ao, p->device, device_channels, map)) {
++            err = AudioUnitSetProperty(p->audio_unit,
++                                       kAudioOutputUnitProperty_ChannelMap,
++                                       kAudioUnitScope_Global, 0, map,
++                                       device_channels * sizeof(SInt32));
++            CHECK_CA_WARN("unable to set the channel map on the audio unit");
++        }
++        talloc_free(map);
++    }
+ 
+     AURenderCallbackStruct render_cb = (AURenderCallbackStruct) {
+         .inputProc       = render_cb_lpcm,
+diff --git a/audio/out/ao_coreaudio_chmap.c b/audio/out/ao_coreaudio_chmap.c
+index 2c6131f..0204bf1 100644
+--- a/audio/out/ao_coreaudio_chmap.c
++++ b/audio/out/ao_coreaudio_chmap.c
+@@ -484,6 +484,75 @@ static void ca_retrieve_layouts(struct ao *ao, struct mp_chmap_sel *s,
+     talloc_free(ta_ctx);
+ }
+ 
++// The stream's channel playing speaker, or -1.
++static int ca_stream_channel(struct ao *ao, int speaker)
++{
++    for (int n = 0; n < ao->channels.num; n++) {
++        if (ao->channels.speaker[n] == speaker)
++            return n;
++    }
++    return -1;
++}
++
++// Fills map, one entry for each of the device's channels, with the stream's
++// channel it plays (or -1), from the device's preferred layout or, when its
++// channels are not labelled, its stereo pair (as Audio MIDI Setup's speaker
++// configuration sets them). Returns false if they name none of the stream's
++// channels, leaving the unit's own map.
++bool ca_get_channel_map(struct ao *ao, AudioDeviceID device,
++                        int device_channels, SInt32 *map)
++{
++    void *ta_ctx = talloc_new(NULL);
++    bool found = false;
++
++    for (int d = 0; d < device_channels; d++)
++        map[d] = -1;
++
++    AudioChannelLayout *ml = ca_query_layout(ao, device, ta_ctx);
++    AudioChannelLayout *l = ml ? ca_layout_to_custom_layout(ao, ta_ctx, ml) : NULL;
++    for (int d = 0; l && d < device_channels &&
++                    d < l->mNumberChannelDescriptions; d++)
++    {
++        int speaker = ca_label_to_mp_speaker_id(
++            l->mChannelDescriptions[d].mChannelLabel);
++        if (speaker >= 0)
++            map[d] = ca_stream_channel(ao, speaker);
++        found |= map[d] >= 0;
++    }
++
++    int left = ca_stream_channel(ao, MP_SPEAKER_ID_FL);
++    int right = ca_stream_channel(ao, MP_SPEAKER_ID_FR);
++    if (!found && left >= 0 && right >= 0) {
++        uint32_t channels[2];
++        uint32_t psize = sizeof(channels);
++        AudioObjectPropertyAddress p_addr = (AudioObjectPropertyAddress) {
++            .mSelector = kAudioDevicePropertyPreferredChannelsForStereo,
++            .mScope    = kAudioDevicePropertyScopeOutput,
++            .mElement  = kAudioObjectPropertyElementWildcard,
++        };
++        OSStatus err = AudioObjectGetPropertyData(device, &p_addr, 0, NULL,
++                                                  &psize, channels);
++        if (err == noErr && channels[0] != channels[1] &&
++            channels[0] >= 1 && channels[0] <= device_channels &&
++            channels[1] >= 1 && channels[1] <= device_channels)
++        {
++            map[channels[0] - 1] = left;
++            map[channels[1] - 1] = right;
++            found = true;
++        }
++    }
++
++    if (found) {
++        MP_VERBOSE(ao, "channel map:");
++        for (int d = 0; d < device_channels; d++)
++            MP_VERBOSE(ao, " %d", (int) map[d]);
++        MP_VERBOSE(ao, "\n");
++    }
++
++    talloc_free(ta_ctx);
++    return found;
++}
++
+ bool ca_init_chmap(struct ao *ao, AudioDeviceID device)
+ {
+     struct mp_chmap_sel chmap_sel = {0};
+diff --git a/audio/out/ao_coreaudio_chmap.h b/audio/out/ao_coreaudio_chmap.h
+index d8bdc59..2944e8a 100644
+--- a/audio/out/ao_coreaudio_chmap.h
++++ b/audio/out/ao_coreaudio_chmap.h
+@@ -29,6 +29,8 @@ AudioChannelLabel mp_speaker_id_to_ca_label(int speaker_id);
+ #if HAVE_COREAUDIO || HAVE_AVFOUNDATION
+ AudioChannelLayout *ca_find_standard_layout(void *talloc_ctx, AudioChannelLayout *l);
+ AudioChannelLayout *ca_get_acl(struct ao *ao, size_t *out_layout_size);
++bool ca_get_channel_map(struct ao *ao, AudioDeviceID device,
++                        int device_channels, SInt32 *map);
+ void ca_log_layout(struct ao *ao, int l, AudioChannelLayout *layout);
+ bool ca_init_chmap(struct ao *ao, AudioDeviceID device);
+ void ca_get_active_chmap(struct ao *ao, AudioDeviceID device, int channel_count,
