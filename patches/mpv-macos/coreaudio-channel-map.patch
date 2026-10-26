@@ -1,0 +1,26 @@
+Mavio's patch to start the coreaudio output where macOS refuses the
+channel layout mpv gives as the output unit's channel map
+(kAudioOutputUnitProperty_ChannelMap answers paramErr, -50, on macOS 27):
+a warning instead of a failure, the unit mapping the channels in order.
+Without it mpv falls back to the avfoundation output, which queues two
+seconds of audio, so that mute and the volume take that long to be heard,
+and a coreaudio device chosen plays nothing. Against mpv 88eb9f2;
+scripts/build-mpv-macos.sh applies it with git apply, which skips this
+header.
+
+diff --git a/audio/out/ao_coreaudio.c b/audio/out/ao_coreaudio.c
+index 7d42139..6bff9bb 100644
+--- a/audio/out/ao_coreaudio.c
++++ b/audio/out/ao_coreaudio.c
+@@ -327,8 +327,9 @@ static bool init_audiounit(struct ao *ao, AudioStreamBasicDescription asbd, Audi
+                                kAudioOutputUnitProperty_ChannelMap,
+                                kAudioUnitScope_Global, 0, layout, layout_size);
+ 
+-    CHECK_CA_ERROR_L(coreaudio_error_audiounit,
+-                     "unable to set the input channel layout on the audio unit");
++    // macOS 27 refuses the layout as a channel map (paramErr); the unit
++    // then maps the channels in order, which suits stereo.
++    CHECK_CA_WARN("unable to set the input channel layout on the audio unit");
+ 
+     AURenderCallbackStruct render_cb = (AURenderCallbackStruct) {
+         .inputProc       = render_cb_lpcm,

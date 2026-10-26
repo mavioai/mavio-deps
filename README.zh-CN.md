@@ -15,7 +15,7 @@
 
 - **libass**：每个平台一个静态库（iOS、iOS 模拟器、tvOS、tvOS 模拟器，以及 arm64 + x86_64 通用的 macOS），链接了 FreeType、FriBidi 与 HarfBuzz，以 Core Text 作为字体提供者，打包为 `Libass.xcframework`，其模块 `Libass` 导出 `ass.h`。Mavio 的 Apple 播放器用它渲染 ASS 字幕。
 - **libmpv**：用 mpv-android 的构建脚本与 JNI 层构建：`mpv/jniLibs/<abi>/` 含 `arm64-v8a`、`armeabi-v7a`、`x86_64` 的 libmpv、FFmpeg、libc++ 与 `libplayer.so`（JNI 层），`mpv/kotlin/is/xyz/mpv/MPVLib.kt` 是 mpv-android 调用它的 Kotlin API。FFmpeg 与 mpv 以 GPL-3.0 构建。
-- **macOS 版 libmpv**：供 Mavio 桌面应用在运行时加载。`mpv-macos/lib/` 含 `libmpv.2.dylib`（arm64 + x86_64 通用，静态链接了 FFmpeg、libass、libplacebo 及其依赖）与 `libMoltenVK.dylib`（它直接链接的 Vulkan 驱动，不经 Vulkan loader，也不需要 ICD 文件）；`mpv-macos/include/mpv/` 是客户端 API 的头文件。两者的 install name 均为 `@rpath/<name>`，应用把它们放进 `Contents/Frameworks` 并把该目录加入运行路径即可；除系统库外它们不链接任何库。需要 macOS 13 或更高版本。mpv 以 `vo=gpu-next`、`gpu-context=macvk` 渲染（经 MoltenVK 的 Vulkan，经 EDR 输出 HDR），以 VideoToolbox 解码；Mavio 的补丁 `patches/mpv-macos/wid.patch` 让它嵌入以 `--wid` 传入的宿主 `NSView`（以 int64 表示的 `NSView *`）：在宿主布局的一个子视图中绘制，而不自建窗口。FFmpeg 与 mpv 以 GPL-3.0 构建。
+- **macOS 版 libmpv**：供 Mavio 桌面应用在运行时加载。`mpv-macos/lib/` 含 `libmpv.2.dylib`（arm64 + x86_64 通用，静态链接了 FFmpeg、libass、libplacebo 及其依赖）与 `libMoltenVK.dylib`（它直接链接的 Vulkan 驱动，不经 Vulkan loader，也不需要 ICD 文件）；`mpv-macos/include/mpv/` 是客户端 API 的头文件。两者的 install name 均为 `@rpath/<name>`，应用把它们放进 `Contents/Frameworks` 并把该目录加入运行路径即可；除系统库外它们不链接任何库。需要 macOS 13 或更高版本。mpv 以 `vo=gpu-next`、`gpu-context=macvk` 渲染（经 MoltenVK 的 Vulkan，经 EDR 输出 HDR），以 VideoToolbox 解码；Mavio 的补丁 `patches/mpv-macos/wid.patch` 让它嵌入以 `--wid` 传入的宿主 `NSView`（以 int64 表示的 `NSView *`）：在宿主布局的一个子视图中绘制，而不自建窗口；`patches/mpv-macos/coreaudio-channel-map.patch` 让 coreaudio 输出在 macOS 拒绝 mpv 作为声道映射传入的声道布局时仍能启动，否则 mpv 会退回到预先排入两秒音频的 avfoundation 输出。FFmpeg 与 mpv 以 GPL-3.0 构建。
 - **Media3 的 FFmpeg 解码扩展**（官方没有发布制品）：`ffmpeg/jniLibs/<abi>/libffmpegJNI.so` 是其 JNI 层，链接了只含音频解码器的 LGPL FFmpeg；`ffmpeg/java/` 是其音频渲染器。它与 Media3 版本绑定，该版本必须与 Mavio 的 `libs/android/gradle/libs.versions.toml` 一致。
 
 每个脚本在开头的变量中固定所有版本，并在 `out/` 下写出 Mavio 仓库所使用的目录（见上表）；构建所用的源码放入 `work/<library>/sources/`。构建时对某个库的源码打的补丁放在 `patches/<library>/`。
@@ -159,7 +159,7 @@ mise exec -- shellcheck scripts/*.sh
 
 | 组件 | 许可证 |
 | :--- | :--- |
-| mpv，含 Mavio 用于将其嵌入宿主视图的补丁（`patches/mpv-macos/wid.patch`） | GPL-2.0-or-later，以 `-Dgpl=true` 构建；与 FFmpeg 结合为 GPL-3.0 |
+| mpv，含 Mavio 用于将其嵌入宿主视图（`patches/mpv-macos/wid.patch`）与启动其 coreaudio 输出（`patches/mpv-macos/coreaudio-channel-map.patch`）的补丁 | GPL-2.0-or-later，以 `-Dgpl=true` 构建；与 FFmpeg 结合为 GPL-3.0 |
 | FFmpeg | GPL-3.0-or-later（`--enable-gpl --enable-version3`） |
 | libass | ISC |
 | FreeType | FTL 或 GPL-2.0-or-later |
